@@ -8,7 +8,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
-// Base price is hash-derived per product; customers get 10% or 15% discount depending on segment.
+/**
+ * Mock adapter for the Pricing upstream service. Base price is derived from a hash of
+ * {@code productId}; authenticated customers receive a 10% discount (15% for every third
+ * customer segment), simulating personalised B2B pricing tiers.
+ */
 @Service
 @Slf4j
 @RequiredArgsConstructor

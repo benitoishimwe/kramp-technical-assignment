@@ -1,261 +1,304 @@
 # Product Information Aggregator
 
-A production-ready backend service that combines data from four internal services
-(Catalog, Pricing, Availability, Customer) into a single, market-aware response for a
-B2B agricultural-parts e-commerce platform.
+> **A production-grade Spring Boot microservice that fans out to four upstream services in parallel over REST and gRPC, assembles a unified product-information response in under 200 ms, and degrades gracefully when optional services fail — deployed to GCP Cloud Run via Terraform and GitHub Actions.**
 
 ---
 
-## How to run
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Clients
+        A[HTTP Client]
+        B[gRPC Client]
+    end
+
+    subgraph "Spring Boot — Cloud Run"
+        C[ProductInfoController\nGET /api/v1/product-info]
+        D[ProductInfoGrpcService\nport 9090]
+        E[AggregationService\nCompletableFuture fan-out]
+        F[CatalogServicePort]
+        G[PricingServicePort]
+        H[AvailabilityServicePort]
+        I[CustomerServicePort]
+    end
+
+    subgraph "Mock Upstreams (simulated latency + failure rate)"
+        J[MockCatalogService\n~50 ms · required]
+        K[MockPricingService\n~80 ms · optional]
+        L[MockAvailabilityService\n~100 ms · optional]
+        M[MockCustomerService\n~60 ms · optional]
+    end
+
+    A -->|JSON| C
+    B -->|Protobuf| D
+    C --> E
+    D --> E
+    E -->|parallel| F & G & H & I
+    F --> J
+    G --> K
+    H --> L
+    I --> M
+```
+
+All four upstream calls are fired simultaneously from a dedicated thread pool. The slowest optional call is the bottleneck; catalog failure immediately returns HTTP 503 / gRPC UNAVAILABLE.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Language | Java 17 |
+| Framework | Spring Boot 3.2.3 |
+| API | REST (Spring MVC) + gRPC (`grpc-server-spring-boot-starter`) |
+| Schema | Protocol Buffers 3 |
+| Build | Maven (`protobuf-maven-plugin` for code generation) |
+| Infrastructure | Terraform (Artifact Registry + Cloud Run) |
+| Cloud | GCP Cloud Run (europe-west1) |
+| CI/CD | GitHub Actions (build → Docker push → Cloud Run deploy) |
+| Auth | GCP Workload Identity Federation (keyless) |
+| Runtime | Eclipse Temurin 17 JRE Alpine (multi-stage Docker) |
+| Testing | JUnit 5, Mockito, Spring MockMvc |
+
+---
+
+## Local Setup
 
 ### Prerequisites
 
-| Tool | Version |
-|------|---------|
-| Java | 17+ |
-| Maven | 3.9+ |
-| Docker | any recent |
+- Java 17+
+- Maven 3.8+ (or use the included `./mvnw` wrapper)
+- Docker (optional, for container testing)
+- `grpcurl` (optional, for gRPC testing)
 
-### Run locally with Maven
+### Run
 
 ```bash
-mvn spring-boot:run
+./mvnw spring-boot:run
 ```
 
 The service starts on:
-- **REST** → `http://localhost:8080`
-- **gRPC** → `localhost:9090`
+- **REST**: `http://localhost:8080`
+- **gRPC**: `localhost:9090`
+- **Health**: `http://localhost:8080/actuator/health`
 
-### Run with Docker
+### REST Examples
 
+**Full request (authenticated customer):**
 ```bash
-# Build
-docker build -t product-info-aggregator .
-
-# Run
-docker run -p 8080:8080 -p 9090:9090 product-info-aggregator
+curl "http://localhost:8080/api/v1/product-info?productId=KR-12345&market=nl-NL&customerId=C-98765"
 ```
 
-### Run tests
-
+**Anonymous request:**
 ```bash
-mvn test
+curl "http://localhost:8080/api/v1/product-info?productId=KR-12345&market=de-DE"
 ```
 
----
-
-## API
-
-### REST
-
-```
-GET /api/v1/product-info?productId={id}&market={market}[&customerId={customerId}]
-```
-
-| Parameter | Required | Example |
-|-----------|----------|---------|
-| `productId` | yes | `KR-12345` |
-| `market` | yes | `nl-NL`, `de-DE`, `pl-PL` |
-| `customerId` | no | `CUST-001` |
-
-**Example request**
-
+**Degraded pricing (pricing service failure simulated):**
 ```bash
-curl "http://localhost:8080/api/v1/product-info?productId=KR-12345&market=pl-PL&customerId=CUST-001"
+# Send many requests — ~0.5% trigger a pricing failure, returning pricing.status=UNAVAILABLE
+for i in $(seq 1 200); do
+  curl -s "http://localhost:8080/api/v1/product-info?productId=KR-$i&market=pl-PL" | jq .pricing.status
+done
 ```
 
-**Example response (all services healthy)**
-
-```json
-{
-  "productId": "KR-12345",
-  "market": "pl-PL",
-  "catalog": {
-    "name": "Hydraulic Filter KR-62345",
-    "description": "High-quality Hydraulic Filter KR-62345 for agricultural and industrial machinery.",
-    "specs": {
-      "weight": "145g",
-      "material": "Aluminium",
-      "oemReference": "OEM-62345",
-      "compatibility": "Tractor, Harvester, Sprayer"
-    },
-    "images": [
-      "https://cdn.kramp.com/products/KR-12345/main.jpg",
-      "https://cdn.kramp.com/products/KR-12345/side.jpg"
-    ],
-    "status": "OK"
-  },
-  "pricing": {
-    "basePrice": 122.0,
-    "discount": 12.2,
-    "finalPrice": 109.8,
-    "currency": "PLN",
-    "status": "OK"
-  },
-  "availability": {
-    "stockLevel": 45,
-    "warehouse": "PL-WH-2",
-    "expectedDeliveryDays": 2,
-    "status": "OK"
-  },
-  "customer": {
-    "customerId": "CUST-001",
-    "segment": "PRO",
-    "preferences": ["fast-delivery", "invoice-payment"],
-    "status": "PERSONALIZED"
-  }
-}
+**Validation error:**
+```bash
+curl "http://localhost:8080/api/v1/product-info?market=nl-NL"
+# → 400 {"code":"MISSING_PARAMETER","message":"Required parameter 'productId' is missing"}
 ```
 
-**Degraded response (Pricing service unavailable)**
-
-```json
-{
-  "pricing": {
-    "currency": "PLN",
-    "status": "UNAVAILABLE"
-  }
-}
-```
-
-**Error response (Catalog unavailable → HTTP 503)**
-
-```json
-{
-  "code": "CATALOG_UNAVAILABLE",
-  "message": "Catalog service timed out for product: KR-12345"
-}
-```
-
-### gRPC
-
-- **Port:** `9090`
-- **Service:** `kramp.aggregator.ProductInfoService`
-- **RPC:** `GetProductInfo(ProductInfoRequest) → ProductInfoResponse`
-- **Proto:** [`src/main/proto/product_info.proto`](src/main/proto/product_info.proto)
-
-Example with [grpcurl](https://github.com/fullstorydev/grpcurl):
+### gRPC Example
 
 ```bash
 grpcurl -plaintext \
-  -d '{"product_id":"KR-12345","market":"nl-NL","customer_id":"CUST-001"}' \
+  -d '{"product_id":"KR-12345","market":"nl-NL","customer_id":"C-99"}' \
   localhost:9090 \
   kramp.aggregator.ProductInfoService/GetProductInfo
 ```
 
----
+### Docker
 
-## Key design decisions and trade-offs
-
-### 1. Parallel upstream calls with CompletableFuture
-
-All four upstream calls are fired simultaneously via `CompletableFuture.supplyAsync()` on a
-dedicated thread pool. The aggregation wall-clock time is ≈ max(individual latencies) rather
-than their sum — with typical latencies of 50/80/100/60 ms, the aggregated response takes
-~120 ms instead of ~290 ms.
-
-`orTimeout()` on each future ensures a slow upstream service does not hold the request
-indefinitely. Timeouts are configurable per-service in `application.yml`.
-
-### 2. Required vs optional data distinction
-
-The design treats **Catalog as a hard dependency** and the rest as optional enrichment:
-
-| Service | Failure behaviour |
-|---------|-----------------|
-| Catalog | Throws `CatalogUnavailableException` → HTTP 503 |
-| Pricing | `pricing.status = "UNAVAILABLE"`, rest of response intact |
-| Availability | `availability.status = "UNKNOWN"`, rest of response intact |
-| Customer | `customer.status = "DEFAULT"`, non-personalized response |
-
-The `CompletableFuture.handle()` operator makes optional degradation clean — it converts
-any exception (timeout or simulated failure) into a sentinel value before the caller ever
-sees it, so the aggregation code stays free of try/catch noise.
-
-### 3. Port/Adapter pattern for upstream services
-
-Each upstream service has an interface (`CatalogServicePort`, etc.) that `AggregationService`
-depends on. The mock implementations live behind those interfaces. When the platform eventually
-has real Catalog/Pricing APIs, replacing mocks with HTTP clients requires zero changes to
-`AggregationService` or the REST/gRPC layer.
-
-### 4. Realistic mock simulation
-
-The mocks:
-- Use `ThreadLocalRandom` for thread-safe jitter and failure rolls (±20% latency, configurable failure rate).
-- Generate **deterministic** data from the product ID hash, so repeated calls to the same product are consistent — matching real catalog/pricing behaviour.
-- Failure rates are read from `AppProperties`, making them tunable via `application.yml` or environment variables without recompiling.
-
-### 5. Shared aggregation core for REST and gRPC
-
-`AggregationService` is called by both `ProductInfoController` (REST) and
-`ProductInfoGrpcService` (gRPC). Both APIs are thin translation layers: they receive
-the domain response and convert it to their wire format. Zero duplication of business logic.
+```bash
+./mvnw package -DskipTests
+docker build -t product-info-aggregator .
+docker run -p 8080:8080 -p 9090:9090 product-info-aggregator
+```
 
 ---
 
-## What I would do differently with more time
+## Running Tests
 
-1. **Caching** — Add a short-lived cache (e.g. Caffeine, ~30 s TTL) in front of Catalog and
-   Pricing calls. Catalog data changes rarely; pricing changes at most a few times per day.
-   This would slash latency for hot products.
+```bash
+./mvnw test
+```
 
-2. **Circuit breaker** — Wrap each upstream call in a Resilience4j circuit breaker. Currently,
-   a service that fails 100% of the time still incurs full timeout delay on every request.
-   A circuit breaker opens after N consecutive failures and returns immediately, keeping the
-   aggregator responsive.
+The test suite contains **21 tests** across three classes:
 
-3. **Structured logging / tracing** — Add a correlation ID (`X-Request-ID` header) propagated
-   through all log lines and gRPC metadata, enabling end-to-end request tracing in a log
-   aggregator (e.g. Cloud Logging, Datadog).
+| Class | Tests | What it covers |
+|---|---|---|
+| `AggregationServiceTest` | 10 | Happy path, catalog failure → 503, each optional service degraded, all optionals fail simultaneously, market-currency mapping, anonymous vs personalised |
+| `ProductInfoControllerTest` | 6 | HTTP 200/400/503, missing params, degraded pricing still 200, MockMvc layer |
+| `MockCatalogServiceTest` | 5 | Deterministic hash-based data generation, spec keys, image URL format |
 
-4. **Market validation** — Validate that the `market` parameter is a known market code
-   and return a clear 400 rather than silently defaulting to EUR.
-
-5. **Integration tests** — Add Spring Boot integration tests (`@SpringBootTest`) that wire
-   the full context and exercise the actual mock services (with zero failure rate) to verify
-   the complete request path.
-
-6. **gRPC reflection** — Enable gRPC server reflection (`grpc-services: REFLECTION`) so
-   tools like grpcurl work without the proto file.
+Tests use `@ExtendWith(MockitoExtension.class)` with `@Mock` ports and a synchronous `Executor` (`Runnable::run`) so `CompletableFuture` behaviour is deterministic in unit tests.
 
 ---
 
-## Adding a new data source
+## Design Decisions
 
-The architecture makes this a four-step change:
+### Why `CompletableFuture` over WebFlux / Project Reactor
 
-1. Define the interface: `src/…/service/port/RelatedProductsServicePort.java`
-2. Write the mock: `src/…/service/upstream/MockRelatedProductsService.java`
-3. Add a field to `ProductInfoResponse` and a new `RelatedProductsInfo` response class.
-4. In `AggregationService.aggregate()`:
-   - Fire `supplyWithTimeout(() → relatedProductsService.fetch(productId, market), timeout)`.
-   - Collect the result with `.handle(...)` (optional pattern).
+The upstream services are synchronous blocking stubs (and will be real HTTP/gRPC clients in production). WebFlux shines when the entire I/O chain is reactive; introducing it here would require wrapping every blocking call in `Mono.fromCallable(...).subscribeOn(Schedulers.boundedElastic())` — the same thread-pool isolation `CompletableFuture` gives with far less ceremony. The dedicated `aggregatorExecutor` pool keeps upstream I/O off HTTP handler threads without adding a reactive dependency.
 
-No existing classes change.
+### Why Port/Adapter (Hexagonal) Pattern
+
+`AggregationService` depends on four interfaces (`CatalogServicePort`, `PricingServicePort`, etc.) rather than concrete classes. This means:
+- The service is testable with plain Mockito mocks — no Spring context required.
+- Swapping mock implementations for real HTTP/gRPC clients requires zero changes to business logic.
+- Each adapter can be versioned, replaced, or circuit-broken independently.
+
+### Why Workload Identity Federation over JSON Service-Account Keys
+
+JSON keys are long-lived credentials that must be rotated, stored as secrets, and can leak. Workload Identity Federation issues short-lived OIDC tokens tied to the GitHub Actions run identity. There are no secrets to rotate, no keys to leak, and the permission boundary is narrowed to the exact repository and branch that triggers the deployment.
+
+### How Partial Failure Is Handled
+
+| Service | Classification | On failure |
+|---|---|---|
+| Catalog | **Required** | Throws `CatalogUnavailableException` → HTTP 503 / gRPC UNAVAILABLE |
+| Pricing | Optional | Returns `PricingInfo` with `status=UNAVAILABLE`, null price fields, currency preserved |
+| Availability | Optional | Returns `AvailabilityInfo` with `status=UNKNOWN`, null warehouse/stock fields |
+| Customer | Optional | Returns `CustomerInfo` with `status=DEFAULT`, null segment/preferences |
+
+Each optional future uses `.handle((data, ex) -> ...)` so a timeout or exception never propagates — the caller always gets a structurally valid response. Failures are logged as WARN; only catalog failures are logged as ERROR.
 
 ---
 
-## Design question — Option A: Adding a Related Products service
+## What I Would Add with More Time
 
-> *"The Assortment team wants to add a 'Related Products' service (200 ms latency, 90% reliability).  
-> How would your design accommodate this? Should it be required or optional?"*
+- **Circuit breakers** — Resilience4j `@CircuitBreaker` per upstream port, with half-open probing. Prevents a flapping Pricing service from exhausting the thread pool.
+- **Redis caching** — Cache catalog data (low churn) for 5 minutes by `productId`. Pricing gets a shorter TTL and must be customer-scoped to avoid leaking personalised prices.
+- **Structured logging with correlation IDs** — Propagate an `X-Request-ID` header through MDC so every log line for a single request shares the same trace ID. Essential for Cloud Logging queries in production.
+- **gRPC server-side streaming** — For batch product lookups (e.g. a cart with 50 items), stream responses as they complete rather than blocking until all are done.
+- **OpenTelemetry tracing** — Instrument each `CompletableFuture` span so Cloud Trace shows the wall-clock breakdown of catalog vs pricing vs availability per request.
+- **Contract tests** — Pact consumer-driven contracts for each port so breaking changes in upstream schemas fail in CI before they reach production.
+- **Helm / Kustomize overlays** — Right now environment differences (staging vs prod failure rates, timeouts) live in `application.yml`. Parameterising them via Helm values makes multi-environment promotion safe.
 
-**It should be optional.** Related products are enrichment; a customer must still be able to
-view and purchase the product they searched for even if the suggestion engine is down.
-90% reliability means 1 in 10 requests would fail — making it required would cause a 10%
-hard failure rate on every page load, which is unacceptable.
+---
 
-**How the current design accommodates it:**
+## Design Question Answer — Option A: Related Products Service
 
-- Fire it in parallel with the existing four calls (adds zero latency on the happy path since
-  the availability service at 100 ms already determines the wall-clock time for most responses;
-  200 ms would slightly increase the ceiling, but with a 300–400 ms timeout it stays within
-  the SLA).
-- Wrap the future in `.handle(...)` — on failure, set `relatedProducts.status = "UNAVAILABLE"`
-  and return an empty list.
-- Add `RelatedProductsInfo` to `ProductInfoResponse` and a new port interface.
+> *How would you extend this aggregator to also return a list of related products for each product lookup?*
 
-The only production concern is that adding a 200 ms call raises the p99 response time.
-Mitigations: set a tight timeout (≤250 ms), and consider prefetching / caching related
-products separately if p99 matters.
+### Approach
+
+**Add a `RelatedProductsServicePort` interface** following the same Port/Adapter pattern:
+
+```java
+public interface RelatedProductsServicePort {
+    List<String> fetchRelatedProductIds(String productId, String market, int limit);
+}
+```
+
+**Fire it in parallel with the existing four calls** inside `AggregationService.aggregate()`:
+
+```java
+CompletableFuture<List<String>> relatedFuture =
+    supplyWithTimeout(
+        () -> relatedProductsService.fetchRelatedProductIds(productId, market, 5),
+        properties.getTimeouts().getRelatedProducts()   // e.g. 300 ms
+    );
+```
+
+**Treat it as optional** (same `.handle()` degradation as Pricing/Availability). A missing related-products list degrades gracefully to an empty list rather than failing the whole response.
+
+**Extend the response model:**
+
+```java
+@Value @Builder
+public class ProductInfoResponse {
+    // ... existing fields ...
+    List<RelatedProductInfo> relatedProducts;  // empty list on degradation
+}
+```
+
+**Proto extension** — add a repeated field to `ProductInfoResponse`:
+
+```protobuf
+message ProductInfoResponse {
+    // ... existing fields ...
+    repeated RelatedProductInfo related_products = 7;
+}
+message RelatedProductInfo {
+    string product_id = 1;
+    string name       = 2;
+    string status     = 3;
+}
+```
+
+### Key trade-offs
+
+| Concern | Decision |
+|---|---|
+| Latency | Related products call runs in parallel — no added latency vs current wall-clock if it returns within the timeout |
+| Depth | Return product IDs only in the first call; a client that needs full product info for a related item makes a second call. Avoids N+1 recursive aggregation on the hot path. |
+| Caching | Related product graphs are stable (hourly churn); this is the highest-value cache candidate — a 60-second Redis TTL eliminates most upstream calls |
+| Failure | Empty list on timeout/error — the parent product response is never sacrificed for related products |
+| Testing | New `MockRelatedProductsService` follows the same `AbstractMockService` pattern; `AggregationServiceTest` gets two new cases: success with related products, and degraded (empty list) on failure |
+
+---
+
+## Live Endpoint
+
+The service is deployed on GCP Cloud Run in `europe-west1`. The URL is printed as a Terraform output after `terraform apply`:
+
+```bash
+cd terraform
+terraform output service_url
+```
+
+The REST health check is publicly accessible:
+```bash
+curl "$(terraform output -raw service_url)/actuator/health"
+```
+
+> **Note:** The Cloud Run instance scales to zero when idle. The first request after a cold start may take 2–4 seconds while the JVM initialises.
+
+---
+
+## Project Structure
+
+```
+src/main/java/com/kramp/aggregator/
+├── AggregatorApplication.java
+├── config/
+│   ├── AppProperties.java        # Per-service timeouts and failure rates
+│   └── AsyncConfig.java          # Dedicated thread pool for upstream I/O
+├── controller/
+│   └── ProductInfoController.java # REST entry point
+├── grpc/
+│   └── ProductInfoGrpcService.java # gRPC entry point
+├── exception/
+│   ├── CatalogUnavailableException.java
+│   ├── UpstreamServiceException.java
+│   └── GlobalExceptionHandler.java
+├── model/
+│   ├── response/                 # API-facing models (CatalogInfo, PricingInfo, …)
+│   └── upstream/                 # Internal data records from upstream ports
+├── service/
+│   ├── AggregationService.java   # Core fan-out and assembly logic
+│   ├── port/                     # Interfaces (hexagonal adapters)
+│   └── upstream/                 # Mock implementations
+└── util/
+    └── MarketUtils.java          # BCP 47 market → ISO 4217 currency
+src/main/proto/
+└── product_info.proto
+terraform/
+├── main.tf                       # Artifact Registry + Cloud Run
+├── variables.tf
+└── outputs.tf
+.github/workflows/
+└── ci-cd.yml                     # build → docker → deploy
+```

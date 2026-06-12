@@ -7,7 +7,11 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-// Warehouse derived from market country code; delivery window widens when stock is zero.
+/**
+ * Mock adapter for the Availability upstream service. Warehouse location is derived
+ * from the market country code; delivery days widen to 7–21 when stock is zero,
+ * reflecting realistic back-order behaviour.
+ */
 @Service
 @Slf4j
 @RequiredArgsConstructor

@@ -6,6 +6,10 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 
 import com.kramp.aggregator.config.AppProperties;
 
+/**
+ * Spring Boot entry point. Enables typed configuration binding via
+ * {@link AppProperties} and starts the embedded Tomcat (REST) and gRPC servers.
+ */
 @SpringBootApplication
 @EnableConfigurationProperties(AppProperties.class)
 public class AggregatorApplication {

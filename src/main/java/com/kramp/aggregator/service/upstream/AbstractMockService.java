@@ -5,7 +5,12 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.util.concurrent.ThreadLocalRandom;
 
-// Simulates network latency (±20% jitter) and random transient failures.
+/**
+ * Base class for mock upstream adapters. Simulates realistic network conditions
+ * by sleeping for {@code baseLatencyMs ± 20%} and throwing
+ * {@link com.kramp.aggregator.exception.UpstreamServiceException} at a configurable
+ * failure rate, so the aggregation layer can be exercised end-to-end without real services.
+ */
 @Slf4j
 public abstract class AbstractMockService {
 

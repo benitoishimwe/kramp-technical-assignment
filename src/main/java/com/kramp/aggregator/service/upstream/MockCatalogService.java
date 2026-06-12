@@ -11,7 +11,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-// Product data is derived from productId hash so the same ID always returns consistent results.
+/**
+ * Mock adapter for the Catalog upstream service. Product data (name, specs, images) is
+ * derived deterministically from a hash of {@code productId} so the same input always
+ * returns the same result — making tests and manual exploration reproducible.
+ */
 @Service
 @Slf4j
 @RequiredArgsConstructor

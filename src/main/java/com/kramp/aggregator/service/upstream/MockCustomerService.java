@@ -11,7 +11,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-// Segment and preferences are hash-derived, so a given customerId always maps to the same profile.
+/**
+ * Mock adapter for the Customer upstream service. Segment and preferences are
+ * hash-derived from {@code customerId}, so the same customer always returns the
+ * same profile — enabling deterministic personalisation tests without a real CRM.
+ */
 @Service
 @Slf4j
 @RequiredArgsConstructor

@@ -6,7 +6,11 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.util.concurrent.Executor;
 
-// Separate pool keeps upstream I/O off the HTTP/gRPC handler threads.
+/**
+ * Provisions a dedicated thread pool for upstream I/O so that slow or timing-out
+ * service calls never block HTTP/gRPC handler threads. Uses a caller-runs rejection
+ * policy to avoid silently dropping requests under saturation.
+ */
 @Configuration
 public class AsyncConfig {
 
